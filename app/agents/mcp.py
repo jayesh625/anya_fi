@@ -359,7 +359,19 @@ class MCPAgent:
         params = {}
         user_lower = user_message.lower()
         
-        # Extract title - look for common patterns
+        def is_generic_title(t: str) -> bool:
+            if not t:
+                return True
+            t_lower = t.lower()
+            generic_words = {
+                "this", "that", "it", "something", "this to my goals", 
+                "my goals", "goals", "goal", "save this", "them", 
+                "this to my goal", "my goal", "save this to my goals",
+                "this goal", "these goals", "my saving goal", "saving goal"
+            }
+            return t_lower in generic_words or len(t) <= 2
+        
+        # Extract title - look for common patterns in current user message
         title_patterns = [
             r"(?:save|saving|buy|purchase|get)\s+(?:a|an|for|)\s*([a-zA-Z0-9\s]+?)(?:\s+for|\s+in|\s+by|$)",
             r"(?:want to|planning to)\s+(?:buy|get|purchase)\s+(?:a|an|)\s*([a-zA-Z0-9\s]+?)(?:\s+for|\s+in|\s+by|$)",
@@ -375,8 +387,11 @@ class MCPAgent:
                 if title and len(title) > 2:
                     params["title"] = title.title()
                     break
+                    
+        if is_generic_title(params.get("title")):
+            params["title"] = None
         
-        # Extract amount - look for numbers with optional currency symbols
+        # Extract amount - look for numbers with optional currency symbols in current user message
         amount_patterns = [
             r'₹\s*([0-9,]+(?:\.[0-9]{2})?)',
             r'rs\.?\s*([0-9,]+(?:\.[0-9]{2})?)',
@@ -437,6 +452,105 @@ class MCPAgent:
                 except ValueError:
                     continue
         
+        # If title or target_amount is missing, try to extract from assistant_response (which represents what LLM claims is set)
+        if not params.get("title") or not params.get("target_amount"):
+            assistant_lower = assistant_response.lower()
+            
+            # Extract title from assistant response
+            if not params.get("title"):
+                # E.g. "Laptop saving goal set" or "goal for a Laptop"
+                title_match = re.search(r"([a-zA-Z0-9\s\-_]+?)\s+saving\s+goal\s+set", assistant_lower)
+                if title_match:
+                    title = title_match.group(1).strip()
+                    title = re.sub(r'\b(for|in|by|the|a|an)\b', '', title).strip()
+                    if title and len(title) > 2:
+                        params["title"] = title.title()
+                
+                if not params.get("title"):
+                    title_match = re.search(r"(?:goal\s+for|track\s+your\s+progress\s+toward)\s+(?:a|an|the\s+)?([a-zA-Z0-9\s]+?)(?:\s+of|\s+is|\s+set|\s+has|\s+by|\.|\n|,|$)", assistant_lower)
+                    if title_match:
+                        title = title_match.group(1).strip()
+                        title = re.sub(r'\b(for|in|by|the|a|an)\b', '', title).strip()
+                        if title and len(title) > 2:
+                            params["title"] = title.title()
+            
+            if is_generic_title(params.get("title")):
+                params["title"] = None
+                
+            # Extract amount from assistant response
+            if not params.get("target_amount"):
+                for pattern in amount_patterns:
+                    match = re.search(pattern, assistant_response, re.IGNORECASE)
+                    if match:
+                        amount_str = match.group(1).replace(',', '')
+                        try:
+                            amount = float(amount_str)
+                            if 100 <= amount <= 100000000:
+                                params["target_amount"] = amount
+                                break
+                        except ValueError:
+                            continue
+
+        # If still missing, check previous messages in history (most recent first)
+        if not params.get("title") or not params.get("target_amount"):
+            for msg in reversed(context.get("history", [])):
+                content = msg.get("content", "")
+                content_lower = content.lower()
+                
+                # Extract title from history
+                if not params.get("title"):
+                    for pattern in title_patterns:
+                        match = re.search(pattern, content_lower)
+                        if match:
+                            title = match.group(1).strip()
+                            title = re.sub(r'\b(for|in|by|the|a|an)\b', '', title).strip()
+                            if title and len(title) > 2:
+                                params["title"] = title.title()
+                                break
+                    if is_generic_title(params.get("title")):
+                        params["title"] = None
+                
+                # Extract amount from history
+                if not params.get("target_amount"):
+                    for pattern in amount_patterns:
+                        match = re.search(pattern, content, re.IGNORECASE)
+                        if match:
+                            amount_str = match.group(1).replace(',', '')
+                            try:
+                                amount = float(amount_str)
+                                if 100 <= amount <= 100000000:
+                                    params["target_amount"] = amount
+                                    break
+                            except ValueError:
+                                continue
+                                
+                # Extract deadline from history
+                if not params.get("deadline_days"):
+                    for pattern, converter in deadline_patterns:
+                        match = re.search(pattern, content_lower)
+                        if match:
+                            try:
+                                params["deadline_days"] = converter(match.group(1))
+                                break
+                            except (ValueError, IndexError):
+                                continue
+
+                # Extract budget from history
+                if not params.get("month_nonessential_budget"):
+                    for pattern in budget_patterns:
+                        match = re.search(pattern, content_lower)
+                        if match:
+                            budget_str = match.group(1).replace(',', '')
+                            try:
+                                params["month_nonessential_budget"] = float(budget_str)
+                                break
+                            except ValueError:
+                                continue
+
+        # Final check to filter out generic titles
+        if is_generic_title(params.get("title")):
+            params["title"] = None
+            
         # If we have at least a title or amount, return params
         if params.get("title") or params.get("target_amount"):
             return params
