@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Run database migrations
+echo "⚙️ Running database migrations..."
+alembic upgrade head
+
 # Start the Telegram bot in the background
 echo "🤖 Launching run_bot.py..."
 python run_bot.py &
